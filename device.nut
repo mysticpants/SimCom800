@@ -13,7 +13,7 @@ class SIM800 {
     _receiveMessage = null;
     _shouldLog = null;
     _currentCommand = null;
-    _httpResponse = null;
+    _response = null;
     _isGPRSConnected = null;
 
     static CID = 1;
@@ -43,6 +43,10 @@ class SIM800 {
         SAPBR = {
             cmd = "SAPBR",
             eos = regexp(@"\s+OK\s+$")
+        },
+        CIPGSMLOC = {
+            cmd = "CIPGSMLOC",
+            eos = regexp(@"CIPGSMLOC: (\d+),(.+),(.+),(.+),(.+)\s+OK\s+$")
         }
     }
 
@@ -50,7 +54,7 @@ class SIM800 {
         _uart = uart;
         _queue = [];
         _receiveMessage = "";
-        _httpResponse = {};
+        _response = {};
         _isGPRSConnected = false;
         local baudRate = ("baudRate" in params) ? params.baudRate : 115200;
         local wordSize = ("wordSize" in params) ? params.wordSize : 8;
@@ -72,11 +76,8 @@ class SIM800 {
             default :
                 throw "it only supports GET and POST";
         }
-        if (callback){
-            _enqueue(function(){
-                callback(_httpResponse);
-            });
-        }
+        _invokeCallback(callback);
+        _resetResponse();
     }
 
     function openGPRSConnection(apn){
@@ -103,11 +104,30 @@ class SIM800 {
         _sendCommand(COMMANDS.HTTPREAD.cmd);
     }
 
+    function getLocation(callback = null){
+        _sendCommand(COMMANDS.CIPGSMLOC.cmd, "=1," + CID);
+        _invokeCallback(callback);
+        _resetResponse();
+    }
 
 
     function _sendCommand(command, query = "") {
         _enqueue(function(){
             _writeCommand(command, query);
+        });
+    }
+
+    function _invokeCallback(callback){
+        if (callback){
+            _enqueue(function(){
+                callback(_response);
+            });
+        }
+    }
+
+    function _resetResponse(){
+        _enqueue(function(){
+            _response = {};
         });
     }
 
@@ -152,10 +172,10 @@ class SIM800 {
                 foreach(key, value in match){
                     switch(key){
                         case 2:
-                            _httpResponse.status <- _receiveMessage.slice(value.begin, value.end);
+                            _response.status <- _receiveMessage.slice(value.begin, value.end);
                             break;
                         case 3:
-                            _httpResponse.size <- _receiveMessage.slice(value.begin, value.end);
+                            _response.size <- _receiveMessage.slice(value.begin, value.end);
                             break;
                     }
                 }
@@ -171,9 +191,22 @@ class SIM800 {
                 foreach(line in lines){
                     content += line + "\n"
                 }
-                _httpResponse.content <- content;
+                _response.content <- content;
                 break;
-
+            case COMMANDS.CIPGSMLOC.cmd:
+                foreach(key, value in match){
+                    switch(key){
+                        case 1:
+                            _response.locationCode <- _receiveMessage.slice(value.begin, value.end);
+                            break;
+                        case 2:
+                            _response.longitude <- _receiveMessage.slice(value.begin, value.end);
+                            break;
+                        case 3:
+                            _response.latitude <- _receiveMessage.slice(value.begin, value.end);
+                            break;
+                    }
+                }
         }
     }
 
@@ -191,10 +224,21 @@ sim800 <- SIM800(uart,{
 });
 sim800.openGPRSConnection("internet");
 
-
+/*
 sim800.sendHttpRequest("http://www.google.com","get", function(response){
     foreach(k,v in response){
         server.log("key is "+k);
         server.log("value is " + v);
     }
 });
+*/
+
+
+/*
+sim800.getLocation(function(response){
+    foreach(k,v in response){
+        server.log("key is "+k);
+        server.log("value is " + v);
+    }
+});
+*/
