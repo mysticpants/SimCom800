@@ -1,10 +1,4 @@
-
-enum SIM800_STATE {
-    INITIAL,
-    NEGOTIATING,
-    RECEIVING
-}
-
+#require "JSONEncoder.class.nut:2.0.0"
 
 class SIM800 {
     _uart = null;
@@ -17,6 +11,7 @@ class SIM800 {
     _isGPRSConnected = null;
 
     static CID = 1;
+    static MAX_TIMEOUT = 100000;
     static COMMANDS = {
         HTTPINIT = {
             cmd = "HTTPINIT",
@@ -38,7 +33,18 @@ class SIM800 {
             cmd = "HTTPREAD",
             eos = regexp(@"\s+OK\s+$")
            // eos = regexp(@"HTTPREAD: (\d+)((.|\s)*)OK\s+$")
-
+        },
+        HTTPSSL = {
+            cmd = "HTTPSSL",
+            eos = regexp(@"\s+OK\s+$")
+        },
+        HTTPDATA = {
+            cmd = "HTTPDATA",
+            eos = regexp(@"\s+DOWNLOAD\s+$")
+        },
+        HTTPTERM = {
+            cmd = "HTTPTERM",
+            eos = regexp(@"\s+OK\s+$")
         },
         SAPBR = {
             cmd = "SAPBR",
@@ -47,6 +53,10 @@ class SIM800 {
         CIPGSMLOC = {
             cmd = "CIPGSMLOC",
             eos = regexp(@"CIPGSMLOC: (\d+),(.+),(.+),(.+),(.+)\s+OK\s+$")
+        },
+        WRITEDATA = {
+            cmd = "WRITEDATA",
+            eos = regexp(@"\s+OK\s+$")
         }
     }
 
@@ -64,20 +74,35 @@ class SIM800 {
         _uart.configure(baudRate, wordSize, parity, stopBits, NO_CTSRTS, _readCommand.bindenv(this));
     }
 
-    function sendHttpRequest(url,method,callback = null){
+    function _sendHttpRequest(url,method,data,callback = null){
         local methodCode;
+        _sendCommand(COMMANDS.HTTPINIT.cmd);
+        _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"CID\"," + CID);
+        _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"URL\"," + url);
         switch(method.tolower()){
             case "get":
-                _createHttpGETRequest(url);
+                _sendCommand(COMMANDS.HTTPACTION.cmd , "=0");
                 break;
             case "post":
-                _createHttpPOSTRequest(url);
+                data = JSONEncoder.encode(data);
+                _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"CONTENT\",\"application/json\"");
+                _sendCommand(COMMANDS.HTTPDATA.cmd , "=" + data.len() + "," + MAX_TIMEOUT);
+                _sendData(COMMANDS.WRITEDATA.cmd,data);
+                _sendCommand(COMMANDS.HTTPACTION.cmd , "=1");
                 break;
-            default :
-                throw "it only supports GET and POST";
         }
+        _sendCommand(COMMANDS.HTTPREAD.cmd);
+        _sendCommand(COMMANDS.HTTPTERM.cmd);
         _invokeCallback(callback);
         _resetResponse();
+    }
+
+    function get(url,callback = null){
+        _sendHttpRequest(url,"get",null, callback);
+    }
+
+    function post(url,data,callback = null){
+        _sendHttpRequest(url,"post",data, callback);
     }
 
     function openGPRSConnection(apn){
@@ -86,28 +111,14 @@ class SIM800 {
         _sendCommand(COMMANDS.SAPBR.cmd , "=1," + CID);
     }
 
-    function _createHttpGETRequest(url){
-        _sendCommand(COMMANDS.HTTPINIT.cmd);
-        _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"CID\"," + CID);
-        _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"URL\"," + url);
-        _sendCommand(COMMANDS.HTTPACTION.cmd , "=0");
-        _sendCommand(COMMANDS.HTTPREAD.cmd);
-    }
-
-
-    function _createHttpPOSTRequest(url){
-        _sendCommand(COMMANDS.HTTPINIT.cmd);
-        _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"CID\"," + CID);
-        _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"URL\"," + url);
-        _sendCommand(COMMANDS.HTTPACTION.cmd , "=1");
-        _sendCommand(COMMANDS.HTTPPARA.cmd , "=\"Content\",")
-        _sendCommand(COMMANDS.HTTPREAD.cmd);
-    }
-
     function getLocation(callback = null){
         _sendCommand(COMMANDS.CIPGSMLOC.cmd, "=1," + CID);
         _invokeCallback(callback);
         _resetResponse();
+    }
+
+    function closeGPRSConnection(){
+        _sendCommand(COMMANDS.SAPBR.cmd , "=0," + CID);
     }
 
 
@@ -121,14 +132,29 @@ class SIM800 {
         if (callback){
             _enqueue(function(){
                 callback(_response);
+                _nextInQueue();
             });
         }
     }
 
     function _resetResponse(){
         _enqueue(function(){
+            _log("reseting _response");
             _response = {};
+            _nextInQueue();
         });
+    }
+
+    function _sendData(command, data){
+        _enqueue(function(){
+            _writeData(command, data);
+        });
+    }
+
+    function _writeData(command, data){
+        _currentCommand = command;
+        _uart.write(data);
+        _log("write data : " + data);
     }
 
     function _writeCommand(command, query){
@@ -160,7 +186,9 @@ class SIM800 {
         local match = COMMANDS[_currentCommand].eos.capture(_receiveMessage);
         if (match || _receiveMessage.find("\nERROR")){
             _log("receiving command : " + _receiveMessage);
-            _processCommand(_currentCommand, match);
+            if (match){
+                _processCommand(_currentCommand, match);
+            }
             _nextInQueue();
             _receiveMessage = "";
         }
@@ -182,11 +210,13 @@ class SIM800 {
                 break;
             case COMMANDS.HTTPREAD.cmd:
                 local lines = split(_receiveMessage, "\n");
-                // remove the first two and last two substrings
-                lines.pop();
+                // remove the first  and last substrings
                 lines.pop();
                 lines.remove(0);
-                lines.remove(0);
+                if (lines.len() >= 4){
+                    lines.pop();
+                    lines.remove(0);
+                }
                 local content = "";
                 foreach(line in lines){
                     content += line + "\n"
@@ -222,16 +252,21 @@ local uart = hardware.uart6E;
 sim800 <- SIM800(uart,{
     shouldLog = true
 });
+
+
 sim800.openGPRSConnection("internet");
 
+
 /*
-sim800.sendHttpRequest("http://www.google.com","get", function(response){
+sim800.get("http://www.google.com", function(response){
     foreach(k,v in response){
         server.log("key is "+k);
         server.log("value is " + v);
     }
 });
 */
+
+
 
 
 /*
@@ -242,3 +277,12 @@ sim800.getLocation(function(response){
     }
 });
 */
+
+
+sim800.post("http://httpbin.org/post",{"one":1,"two":2},function(response){
+    foreach(k,v in response){
+        server.log(format("%s is %s",k,v));
+    }
+});
+
+sim800.closeGPRSConnection();

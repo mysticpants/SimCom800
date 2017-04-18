@@ -1,0 +1,9 @@
+{ 
+ "device_file_out":"build/test.device.nut",
+ "device_file_in":"device.nut",
+ "agent_file_out":"build/agent.nut",
+ "agent_file_in":"agent.nut",
+ "api_file":"build_api_key",
+ "model_key":"0d_NyQ9vG4JI",
+ "dirs": ["./lib"]
+}
